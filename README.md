@@ -16,6 +16,8 @@ python -m pip install -r requirements.txt
 ```
 
 브라우저에서 **http://127.0.0.1:8765**에 접속해 BBox 또는 Segmentation을 선택합니다.
+`./run.sh`는 저장소의 `.venv`, 현재 Python, 기존 Conda `yolo` 환경 순서로 필요한 패키지가 있는 Python을 찾습니다.
+`launcher.html`을 직접 열면 기본 서버 주소로 이동하므로 서버를 먼저 실행하세요.
 다른 Python이나 포트를 사용하려면 다음처럼 실행합니다.
 
 ```bash
