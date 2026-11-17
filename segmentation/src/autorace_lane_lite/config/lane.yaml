@@ -1,0 +1,40 @@
+lane_node:
+  ros__parameters:
+    backend: auto  # auto | tensorrt | onnx | torch | opencv
+    model_path: ''
+    device: cuda
+    input_width: 512
+    input_height: 288
+    fallback_enabled: true
+    confidence_threshold: 0.5
+    retry_seconds: 5.0
+    camera_topic: /camera/color/image_raw/compressed
+    process_hz: 30.0
+    max_image_age_seconds: 0.25
+    future_tolerance_seconds: 0.05
+    sign_ttl_seconds: 1.0
+    debug_masks: false
+    bev_width: 320
+    bev_height: 240
+    # Normalized image points TL,TR,BR,BL. EXAMPLE: calibrate for the real camera!
+    bev_source: [0.43, 0.55, 0.57, 0.55, 0.95, 0.98, 0.05, 0.98]
+    bev_lateral_m: 2.0
+    bev_forward_m: 2.5
+    lane_width_ratio: 0.45
+    window_margin_ratio: 0.08
+    window_min_pixels: 8
+    min_windows: 3
+    tracking_alpha: 0.65
+    lookahead_m: 0.7
+    wheelbase_m: 0.2
+    heading_gain: 0.2
+    max_steering_rad: 0.45
+    max_center_offset_m: 0.8
+    speed_mps: 0.3
+    curve_slowdown: 2.0
+    # OpenCV HSV fallback. White-solid rejection is heuristic, not learned.
+    orange_lower: [5, 90, 80]
+    orange_upper: [38, 255, 255]
+    white_lower: [0, 0, 160]
+    white_upper: [179, 65, 255]
+    white_max_height_ratio: 0.45

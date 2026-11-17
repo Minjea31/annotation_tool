@@ -1,0 +1,10 @@
+{
+  "file": "yolo26n_red_green_200ep.pt",
+  "architecture": "YOLO26 Nano",
+  "source": "red_green_200ep",
+  "classes": [
+    "red",
+    "green"
+  ],
+  "sha256": "c2b39d49797a7d606576e7f3ff52746871731cc72e0675eb901e7941eacf8683"
+}

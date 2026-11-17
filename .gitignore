@@ -1,0 +1,40 @@
+# Managed datasets and review/training history stay local.
+/bbox/dataset/*
+!/bbox/dataset/.gitkeep
+/segmentation/dataset/*
+!/segmentation/dataset/.gitkeep
+**/runs/
+**/work/
+**/torch_cache/
+
+# Publish only the selected model for each task.
+*.pt
+*.pth
+*.onnx
+*.engine
+!/bbox/models/yolo26n_red_green_200ep.pt
+!/segmentation/models/best.pt
+
+# Local environments, credentials and assistant session files.
+.venv/
+venv/
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+.codex/
+.agents/
+AGENTS.md
+CLAUDE.md
+.gpt/
+.chatgpt/
+GPT/
+gpt/
+**/__pycache__/
+*.py[cod]
+*.log
+*.sqlite*
+.pytest_cache/
+.path_migration_backup/
+.DS_Store

@@ -1,0 +1,2 @@
+-r bbox/requirements.txt
+-r segmentation/train/requirements.txt
