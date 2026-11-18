@@ -5,7 +5,7 @@ const fs=require('node:fs');
 const path=require('node:path');
 const vm=require('node:vm');
 
-async function editor({predicted=false,edited=false}={}){
+async function editor({predicted=false,edited=false,insecure=false,stateFailures=0}={}){
  const box={id:'prediction-box',class_id:2,x1:30,y1:40,x2:130,y2:140};
  const editedBox={...box,id:'edited-box',class_id:3,x1:200,x2:300};
  const row={id:'image',name:'sample.png',session:'bag',status:'unreviewed',current:predicted?'prediction':null,prediction:predicted?'prediction':null};
@@ -14,19 +14,24 @@ async function editor({predicted=false,edited=false}={}){
  const labels={prediction:[box],edited:[editedBox]};
  if(edited){row.current='edited';revisions.push({id:'edited',kind:'edited',created:2});}
  const strokes=[],texts=[],requests=[],elements=new Map(),listeners={};
+ let pollCallback,stateGate,releaseState;
  const context={clearRect(){strokes.length=0;texts.length=0;},save(){},restore(){},translate(){},scale(){},drawImage(){},fillRect(){},strokeRect(...args){strokes.push(args);},fillText(s){texts.push(s);},measureText(s){return {width:s.length*7};}};
  function element(id){
   if(!elements.has(id))elements.set(id,{value:id==='filter'?'pending':id==='confidence'?'0.25':id==='model'?'baseline':'',options:[],dataset:{},style:{},clientWidth:900,clientHeight:700,
    textContent:'',innerHTML:'',classList:{toggle(){}},focus(){},setPointerCapture(){},click(){return this.onclick?.();},setAttribute(k,v){this[k]=v;},getContext(){return context;},getBoundingClientRect(){return {left:0,top:0};}});
   return elements.get(id);
  }
- const sandbox={console,structuredClone,setTimeout,clearTimeout,setInterval(){},crypto:require('node:crypto'),ResizeObserver:class{observe(){}},
+ const sandbox={console,structuredClone,setTimeout,clearTimeout,setInterval(callback){pollCallback=callback;},crypto:insecure?{getRandomValues:array=>require('node:crypto').webcrypto.getRandomValues(array)}:require('node:crypto'),ResizeObserver:class{observe(){}},
   Image:class{width=640;height=480;async decode(){}},window:{},
   document:{querySelector(s){return s==='dialog[open]'?null:element(s.slice(1));},querySelectorAll(){return [];},addEventListener(type,callback){listeners[type]=callback;}},
   async fetch(url,options={}){
    requests.push({url,...options});
    let value;
-   if(url==='api/state')value=data;
+   if(url==='api/state'){
+    if(stateFailures>0){stateFailures--;throw Error('Temporary connection failure');}
+    if(stateGate)await stateGate;
+    value=data;
+   }
    else if(url==='api/infer')value={job:'queued'};
    else if(/^api\/images\/[^/]+\/revisions$/.test(url))value=revisions;
    else if(url.startsWith('api/revisions/'))value=labels[url.split('/')[2]];
@@ -37,6 +42,9 @@ async function editor({predicted=false,edited=false}={}){
  vm.runInContext(fs.readFileSync(path.join(__dirname,'static/app.js'),'utf8'),sandbox);
  await new Promise(resolve=>setImmediate(resolve));
  return {data,row,revisions,labels,box,strokes,texts,requests,element,
+  poll:()=>pollCallback(),
+  holdState(){stateGate=new Promise(resolve=>{releaseState=resolve;});},
+  releaseState(){releaseState();stateGate=null;},
   run:code=>vm.runInContext(code,sandbox),
   pointer(type,x,y){const e=vm.runInContext(`({button:0,pointerId:1,clientX:tx+${x}*scale,clientY:ty+${y}*scale,preventDefault(){}})`,sandbox);element('canvas')['onpointer'+type](e);},
   key(code){listeners.keydown({code,repeat:false,target:{matches(){return false;}},preventDefault(){}});},
@@ -48,6 +56,28 @@ test('existing inference draws bbox coordinates and class name on opening',async
  assert.deepEqual(ui.strokes,[[30,40,100,100]]);
  assert.deepEqual(ui.texts,['crosswalk']);
  assert.equal(ui.element('predictionInfo').textContent,'모델 예측 · 1개');
+});
+
+test('initial connection failure retries both the library and the image',async()=>{
+ const ui=await editor({predicted:true,stateFailures:1});
+ assert.equal(ui.run('current'),null);
+ assert.match(ui.element('count').textContent,/연결 확인/);
+ await ui.poll();
+ assert.equal(ui.run('current.id'),'image');
+ assert.equal(ui.run('picture!==null'),true);
+ assert.deepEqual(ui.strokes,[[30,40,100,100]]);
+ assert.equal(ui.element('count').textContent,'1 / 1');
+});
+
+test('a slow library request is not duplicated by the next poll',async()=>{
+ const ui=await editor({predicted:true});
+ const before=ui.requests.filter(r=>r.url==='api/state').length;
+ ui.holdState();
+ const first=ui.poll(),second=ui.poll();
+ await new Promise(resolve=>setImmediate(resolve));
+ assert.equal(ui.requests.filter(r=>r.url==='api/state').length,before+1);
+ ui.releaseState();await Promise.all([first,second]);
+ assert.equal(ui.run('current.id'),'image');
 });
 
 test('individual prediction appears while the batch is still running',async()=>{
@@ -225,6 +255,19 @@ test('drawing a new bbox still works in empty space',async()=>{
  const coords=Array.from(ui.run('[boxes[1].x1,boxes[1].y1,boxes[1].x2,boxes[1].y2]'));
  [250,220,350,300].forEach((expected,i)=>assert.ok(Math.abs(coords[i]-expected)<1e-6));
  assert.equal(ui.run('dirty'),true);
+});
+
+test('D draws boxes over LAN HTTP without crypto.randomUUID',async()=>{
+ const ui=await editor({predicted:true,insecure:true});
+ assert.equal(ui.run('typeof crypto.randomUUID'),'undefined');
+ ui.key('KeyD');assert.equal(ui.run('tool'),'draw');
+ ui.pointer('down',250,220);ui.pointer('move',350,300);ui.pointer('up',350,300);
+ ui.pointer('down',450,320);ui.pointer('move',550,400);ui.pointer('up',550,400);
+ assert.equal(ui.run('boxes.length'),3);
+ const ids=Array.from(ui.run('boxes.slice(1).map(b=>b.id)'));
+ ids.forEach(id=>assert.match(id,/^[0-9a-f]{32}$/));
+ assert.notEqual(ids[0],ids[1]);assert.equal(ui.run('dirty'),true);
+ ui.key('KeyZ');assert.equal(ui.run('boxes.length'),2);
 });
 
 test('selected box corner handles still resize and can be undone',async()=>{

@@ -13,3 +13,5 @@
 .workbench{height:calc(100dvh - 94px);min-height:650px}
 .workbench #canvas{position:absolute;inset:0;width:100%;height:100%}
 @media(max-width:1100px){.workbench{height:calc(100dvh - 86px);min-height:650px}}
+
+#syncNotice:not([hidden]){position:absolute;top:12px;left:12px;right:12px;display:flex;align-items:center;justify-content:space-between;gap:12px;padding:10px 12px;background:#3d3024;border:1px solid #8b633a;border-radius:7px;z-index:1;font-size:12px}#syncNotice button{flex-shrink:0}

@@ -14,6 +14,19 @@ def link(source,destination):
   except OSError:shutil.copy2(source,tmp)
   tmp.replace(destination)
  finally:tmp.unlink(missing_ok=True)
+def split_assignments(samples,entries,seed):
+ """Keep imported train/validation membership and fixed eval groups."""
+ import random
+ pool=sorted([r for r in samples if entries[r['origin']]['group']=='pool'],key=lambda r:r['origin'])
+ random.Random(seed).shuffle(pool)
+ cut=max(1,min(len(pool)-1,round(len(pool)*.75))) if len(pool)>1 else len(pool)
+ assignments={r['id']:'eval' for r in samples if entries[r['origin']]['group']=='eval'}
+ pinned={r['id']:entries[r['origin']]['view_split'] for r in pool if entries[r['origin']].get('view_split') in ('train','test')}
+ assignments.update(pinned)
+ remaining_train=max(0,cut-sum(split=='train' for split in pinned.values()))
+ for i,r in enumerate(r for r in pool if r['id'] not in pinned):
+  assignments[r['id']]='train' if i<remaining_train else 'test'
+ return assignments
 def publish(root,samples,unlabeled,registry_path,label_dir,seed=None):
  """samples: id/origin/sha256/revision/image/label. Only owned view files are cleaned."""
  root=Path(root);registry_path=Path(registry_path)
@@ -28,11 +41,7 @@ def publish(root,samples,unlabeled,registry_path,label_dir,seed=None):
   if group is None:group='eval' if needed>0 else 'pool';needed-=int(group=='eval')
   entries[r['origin']]={'group':group,'sha256':r['sha256'],'revision':None};groups[r['sha256']]=group
  if samples or registry_path.exists():atomic(registry_path,registry)
- import random
- pool=sorted([r for r in samples if entries[r['origin']]['group']=='pool'],key=lambda r:r['origin']);random.Random(seed).shuffle(pool)
- cut=max(1,min(len(pool)-1,round(len(pool)*.75))) if len(pool)>1 else len(pool)
- assignments={r['id']:'train' if i<cut else 'test' for i,r in enumerate(pool)}
- assignments.update({r['id']:'eval' for r in samples if entries[r['origin']]['group']=='eval'})
+ assignments=split_assignments(samples,entries,seed)
  manifest_path=root/'manifest.json';old=json.loads(manifest_path.read_text()) if manifest_path.exists() else {'files':[]}
  owned=[];rows=[]
  for split in ('train','test','eval'):

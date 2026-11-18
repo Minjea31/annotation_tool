@@ -8,7 +8,10 @@ def main():
  with tempfile.TemporaryDirectory(prefix='bbox-browser-') as temp:
   temp=Path(temp);source=temp/'input';source.mkdir();Image.new('RGB',(640,480),(30,40,55)).save(source/'sample.png')
   sock=socket.socket();sock.bind(('127.0.0.1',0));port=sock.getsockname()[1];sock.close()
-  runner=temp/'serve.py';runner.write_text(f"import sys\nsys.path.insert(0,{str(ROOT)!r})\nfrom bbox import app as b\nfrom fastapi import FastAPI\nimport uvicorn\nb.initialize()\napp=FastAPI()\napp.mount('/bbox',b.app)\nuvicorn.run(app,host='127.0.0.1',port={port})\n")
+  with socket.socket(socket.AF_INET,socket.SOCK_DGRAM) as connection:
+   try:connection.connect(('10.255.255.255',1));browser_host=connection.getsockname()[0]
+   except OSError:browser_host='127.0.0.1'
+  runner=temp/'serve.py';runner.write_text(f"import sys\nsys.path.insert(0,{str(ROOT)!r})\nfrom bbox import app as b\nfrom fastapi import FastAPI\nimport uvicorn\nb.initialize()\napp=FastAPI()\napp.mount('/bbox',b.app)\nuvicorn.run(app,host='0.0.0.0',port={port})\n")
   env={**os.environ,'BBOX_REVIEW_WORK':str(temp/'data/_store/review'),'BBOX_REVIEW_DATA':str(temp/'data'),'OMP_NUM_THREADS':'4'}
   with (temp/'server.log').open('w') as log:
    proc=subprocess.Popen([sys.executable,str(runner)],env=env,stdout=log,stderr=subprocess.STDOUT)
@@ -21,11 +24,15 @@ def main():
     with sync_playwright() as p:
      browser=p.chromium.launch(executable_path='/usr/bin/google-chrome',headless=True,args=['--no-sandbox'])
      page=browser.new_page(viewport={'width':1600,'height':1000});errors=[];page.on('pageerror',lambda e:errors.append(str(e)))
-     page.goto(f'http://127.0.0.1:{port}/bbox/');page.locator('#import').click();page.locator('#folder').fill(str(source));page.locator('#importForm button.primary').click();page.wait_for_function('picture!==null')
+     page.goto(f'http://{browser_host}:{port}/bbox/');page.locator('#import').click();page.locator('#folder').fill(str(source));page.locator('#importForm button.primary').click();page.wait_for_function('picture!==null')
+     if browser_host!='127.0.0.1':
+      assert not page.evaluate('isSecureContext')
+      assert page.evaluate('typeof crypto.randomUUID')=='undefined'
      def pos(x,y):return page.evaluate('([x,y])=>{let r=canvas.getBoundingClientRect();return [r.left+tx+x*scale,r.top+ty+y*scale]}',[x,y])
      def drag(a,b):
       page.mouse.move(*pos(*a));page.mouse.down();page.mouse.move(*pos(*b),steps=8);page.mouse.up()
-     page.locator('#drawTool').click();drag((80,70),(250,200));assert page.evaluate('boxes.length')==1
+     page.locator('#canvas').focus();page.keyboard.press('KeyD');assert page.evaluate('tool')=='draw'
+     drag((80,70),(250,200));assert page.evaluate('boxes.length')==1
      page.locator('#selectTool').click();drag((160,130),(180,150));assert abs(page.evaluate('boxes[0].x1')-100)<2
      edge=page.evaluate('[boxes[0].x2,boxes[0].y2]');drag(edge,(310,260));assert abs(page.evaluate('boxes[0].x2')-310)<2
      page.locator('#class').select_option('3');assert page.evaluate('boxes[0].class_id')==3
@@ -45,7 +52,7 @@ def main():
      assert len(list((temp/'data/deleted/labels').glob('*.txt')))==1
      assert len(list((temp/'data/deleted/history').rglob('*.json')))==1
      assert not errors,errors
-     browser.close();print('Browser import, draw, move, resize, class, undo/redo, save/reload and deletion passed')
+     browser.close();print(f'Browser ({browser_host}) import, D draw, move, resize, class, undo/redo, save/reload and deletion passed')
    finally:
     proc.terminate()
     try:proc.wait(timeout=10)

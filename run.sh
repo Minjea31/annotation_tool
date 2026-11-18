@@ -16,5 +16,5 @@ if [[ -z "$annotation_python" ]]; then
 fi
 export OMP_NUM_THREADS="${OMP_NUM_THREADS:-4}"
 export MKL_NUM_THREADS="${MKL_NUM_THREADS:-4}"
-echo "Annotation: http://127.0.0.1:${ANNOTATION_PORT:-8765} (Python: $annotation_python)"
+echo "Annotation Python: $annotation_python"
 exec "$annotation_python" "$annotation_dir/server.py"

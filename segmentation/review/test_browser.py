@@ -41,7 +41,7 @@ def check_all_infer_button(page):
  def infer_route(route):
   captured.append(route.request.post_data_json)
   route.fulfill(json={'job':'browser-test-intercept'})
- page.route('**/api/state',state_route)
+ page.route('**/api/state*',state_route)
  page.route('**/api/infer',infer_route)
  try:
   page.evaluate('refresh()')
@@ -59,7 +59,7 @@ def check_all_infer_button(page):
   page.evaluate("state.jobs=[{kind:'infer',state:'running'}];renderAllInfer()")
   assert page.locator('#allInfer').is_disabled()
  finally:
-  page.unroute('**/api/state',state_route);page.unroute('**/api/infer',infer_route)
+  page.unroute('**/api/state*',state_route);page.unroute('**/api/infer',infer_route)
   page.locator('#search').fill('')
   page.select_option('#filter','all')
   page.evaluate('refresh()')

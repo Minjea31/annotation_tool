@@ -3,6 +3,7 @@
 !/bbox/dataset/.gitkeep
 /segmentation/dataset/*
 !/segmentation/dataset/.gitkeep
+/backups/
 **/runs/
 **/work/
 **/torch_cache/

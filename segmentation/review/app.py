@@ -1,4 +1,4 @@
-"""Local, single-user lane review server. Run with the training Python environment."""
+"""Lane review server with shared local storage. Run with the training Python environment."""
 import base64
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
@@ -207,10 +207,12 @@ class ImportRequest(BaseModel):
 class SaveRequest(BaseModel):
     mask: str
     expected_revision: str | None = None
+    approve: bool = False
 
 
 class StatusRequest(BaseModel):
     status: str
+    expected_revision: str | None = None
 
 
 class ApplyRequest(BaseModel):
@@ -235,13 +237,25 @@ class TrainRequest(BaseModel):
     seed: int = 31
 
 
+IMAGE_FIELDS = ('id', 'name', 'session', 'split', 'width', 'height', 'status', 'current', 'prediction', 'updated')
+
+
+def client_image(row):
+    return {key: row[key] for key in IMAGE_FIELDS}
+
+
 @app.get('/api/state')
-def state():
-    images = query('SELECT * FROM images ORDER BY session,name')
+def state(compact: bool = False, image_id: str | None = None):
+    fields = ','.join(IMAGE_FIELDS) if compact else '*'
+    images = query(f'SELECT {fields} FROM images ORDER BY session,name')
     jobs = query('SELECT * FROM jobs ORDER BY created DESC LIMIT 30')
     for job in jobs:
         job['payload'] = json.loads(job['payload'])
         job['result'] = json.loads(job['result']) if job['result'] else None
+        if compact and 'images' in job['payload']:
+            selected = job['payload'].pop('images')
+            job['payload']['image_count'] = len(selected)
+            job['payload']['current_image'] = image_id if image_id in selected else None
         metric_file = WORK / 'runs' / job['id'] / 'metrics.jsonl'
         job['metrics'] = []
         if metric_file.exists():
@@ -347,9 +361,10 @@ def save_mask(image_id: str, body: SaveRequest):
         path = WORK / 'masks' / f'{uid()}.png'
         Image.fromarray(pixels.astype(np.uint8)).save(path)
         rev = revision(image_id, 'edited', path)
-        update("UPDATE images SET current=?,status='editing',updated=? WHERE id=?", (rev, time.time(), image_id))
+        update('UPDATE images SET current=?,status=?,updated=? WHERE id=?',
+               (rev, 'approved' if body.approve else 'editing', time.time(), image_id))
         sync_approved()
-    return {'revision': rev}
+        return {'revision': rev, 'image': client_image(item(image_id))}
 
 
 @app.post('/api/images/{image_id}/status')
@@ -357,13 +372,15 @@ def set_status(image_id: str, body: StatusRequest):
     with LOCK:
         row = item(image_id)
         editable(row)
+        if 'expected_revision' in body.model_fields_set and body.expected_revision != row['current']:
+            raise HTTPException(409, '라벨이 변경되었습니다. 최신 라벨을 확인한 뒤 다시 승인하세요.')
         if body.status not in ['approved', 'editing', 'excluded', 'retry', 'unreviewed']:
             raise HTTPException(400, 'Unknown status')
         if body.status == 'approved' and not row['current']:
             raise HTTPException(400, 'Save a mask first; empty masks may also be approved')
         update('UPDATE images SET status=?,updated=? WHERE id=?', (body.status, time.time(), image_id))
         sync_approved()
-    return {'ok': True}
+        return {'ok': True, 'image': client_image(item(image_id))}
 
 
 @app.post('/api/images/{image_id}/delete')

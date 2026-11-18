@@ -5,7 +5,9 @@ const canvas=$('#canvas'),ctx=canvas.getContext('2d'),overlay=document.createEle
 const names={unreviewed:'미검수',editing:'수정 중',approved:'승인됨',retry:'재추론 대기',excluded:'제외',deleted:'삭제 보관'};
 function escape(s){return String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));}
 function toast(s){$('#toast').textContent=s;$('#toast').style.display='block';clearTimeout(toastTimer);toastTimer=setTimeout(()=>$('#toast').style.display='none',6000);}
-async function api(path,body){const r=await fetch('api'+path,body===undefined?{}:{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});if(!r.ok){let d=await r.json();throw Error(typeof d.detail==='string'?d.detail:JSON.stringify(d.detail));}return r.json();}
+async function api(path,body){const r=await fetch('api'+path,body===undefined?{}:{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});if(!r.ok){let d=await r.json();const error=Error(typeof d.detail==='string'?d.detail:JSON.stringify(d.detail));error.status=r.status;throw error;}return r.json();}
+function showSyncNotice(){$('#syncNotice').hidden=false;}
+function labelConflict(){showSyncNotice();return Error('다른 사람이 이 이미지를 수정했습니다. 내 수정은 유지됩니다. 최신 라벨을 불러와 확인한 뒤 다시 수정·승인하세요.');}
 function safe(fn){return async(...a)=>{try{await fn(...a);}catch(e){toast(e.message);console.error(e);}};}
 function filtered(){const f=$('#filter').value,q=$('#search').value.toLowerCase();return state.images.filter(i=>(i.status!=='deleted'||f==='deleted')&&(f==='all'||f==='pending'&&['unreviewed','retry'].includes(i.status)||f==='completed'&&['approved','editing'].includes(i.status)||i.status===f)&&(!q||(i.name+' '+i.session).toLowerCase().includes(q)));}
 function renderList(){const rows=filtered(),visible=new Set(rows.map(i=>i.id));selected=new Set([...selected].filter(id=>visible.has(id)));$('#total').textContent=rows.length+' / '+state.images.length;$('#summary').textContent=`승인 ${state.images.filter(i=>i.status==='approved').length} · 재추론 ${state.images.filter(i=>i.status==='retry').length} · 수정 ${state.images.filter(i=>i.status==='editing').length}`;$('#selectedCount').textContent=selected.size?`${selected.size}개 선택`:'';$('#images').innerHTML=rows.map(i=>`<div class="image-row ${current?.id===i.id?'selected':''}" data-id="${i.id}"><input type="checkbox" ${selected.has(i.id)?'checked':''} aria-label="이미지 선택"><div><div class="name" title="${escape(i.name)}">${escape(i.name)}</div><small><span class="dot ${i.status}"></span>${names[i.status]} · ${escape(i.session)}</small></div></div>`).join('');$$('.image-row').forEach(el=>{el.onclick=safe(async e=>{if(e.target.type==='checkbox'){e.target.checked?selected.add(el.dataset.id):selected.delete(el.dataset.id);$('#selectedCount').textContent=`${selected.size}개 선택`;return;}await navigate(el.dataset.id);});});}
@@ -22,19 +24,36 @@ function modelOptions(){
 function trainingDefaults(){const fresh=$('#trainModel').value==='fresh';$('#epochs').value=fresh?80:20;$('#lr').value=fresh?'0.001':'0.0001';}
 $('#trainModel').onchange=trainingDefaults;
 
-function renderJobs(){const labels={queued:'대기 중',running:'진행 중',complete:'완료',failed:'실패',interrupted:'서버 재시작으로 중단'};$('#jobs').innerHTML=state.jobs.length?state.jobs.slice(0,6).map(j=>{const m=j.metrics.at(-1), best=j.result?.best, mId=j.result?.model?.id;return `<div class="job"><div class="job-head"><b>${j.kind==='train'?'모델 추가 학습':'라벨 초안 추론'} · ${labels[j.state]}</b><span>${j.id.slice(0,6)}</span></div>${j.kind==='train'?`<p>640×480 · ${j.payload.epochs} epoch · ${j.payload.dataset?.policy_id?'고정 eval':'이전 분할'} · 데이터 ${j.payload.dataset?.counts?.train??''} train / ${j.payload.dataset?.counts?.val??''} test /  ${j.payload.dataset?.counts?.test??'—'} eval</p><progress value="${m?.epoch??0}" max="${j.payload.epochs}"></progress>${m?`<p>${m.epoch}/${j.payload.epochs} · loss ${m.train.loss.toFixed(3)} · 검증 IoU ${(m.val.lane_miou*100).toFixed(1)}% · 주황 ${(m.val.iou[1]*100).toFixed(1)}% / 점선 ${(m.val.iou[2]*100).toFixed(1)}%</p>`:''}${best?`<p>최고 epoch ${best.epoch} · 검증 IoU ${(best.val.lane_miou*100).toFixed(1)}% · 시작 모델 ${j.payload.model==='fresh'?'ImageNet 초기 가중치':escape(state.models.find(x=>x.id===j.payload.model)?.name)}</p>`:''}`:`<p>${j.result?.completed??0}/${j.payload.images.length}장 · 실패 ${j.result?.errors?.length??0}</p>`}${j.error?`<p class="error">${escape(j.error)}</p>`:''}${j.result?.errors?.length?`<p class="error">${escape(j.result.errors.map(e=>e.error).join('\n'))}</p>`:''}${j.result?.test?`<p>최종 eval IoU ${(j.result.test.lane_miou*100).toFixed(1)}% · 모델 선택에는 미사용</p>`:''}${mId?`<button data-use-model="${mId}">이 모델로 추론하기</button> <button data-retry-model="${mId}">대기 ${state.images.filter(i=>i.status==='retry').length}장 재추론</button>`:''}</div>`;}).join(''):'<p class="muted">아직 실행한 작업이 없습니다. 모델로 라벨 초안을 만들어보세요.</p>';$$('[data-use-model]').forEach(b=>b.onclick=()=>{$('#model').value=b.dataset.useModel;toast('추론 모델을 선택했습니다.');});$$('[data-retry-model]').forEach(b=>b.onclick=safe(()=>submitInfer(state.images.filter(i=>i.status==='retry').map(i=>i.id),b.dataset.retryModel)));}
-async function refresh(){const oldJobs=state.jobs;state=await api('/state');$('#connection').textContent='● 로컬 연결됨';renderList();modelOptions();renderJobs();renderAllInfer();if(current){const row=state.images.find(i=>i.id===current.id);if(row){current={...row};updateHeading();}const completed=state.jobs.some(j=>j.kind==='infer'&&j.state==='complete'&&oldJobs.some(o=>o.id===j.id&&o.state!=='complete')&&j.payload.images.includes(current.id));if(completed&&!dirty&&!dragging&&!polygon.length)await loadImage(current.id,false);}}
+function renderJobs(){const labels={queued:'대기 중',running:'진행 중',complete:'완료',failed:'실패',interrupted:'서버 재시작으로 중단'};$('#jobs').innerHTML=state.jobs.length?state.jobs.slice(0,6).map(j=>{const m=j.metrics.at(-1), best=j.result?.best, mId=j.result?.model?.id;return `<div class="job"><div class="job-head"><b>${j.kind==='train'?'모델 추가 학습':'라벨 초안 추론'} · ${labels[j.state]}</b><span>${j.id.slice(0,6)}</span></div>${j.kind==='train'?`<p>640×480 · ${j.payload.epochs} epoch · ${j.payload.dataset?.policy_id?'고정 eval':'이전 분할'} · 데이터 ${j.payload.dataset?.counts?.train??''} train / ${j.payload.dataset?.counts?.val??''} test /  ${j.payload.dataset?.counts?.test??'—'} eval</p><progress value="${m?.epoch??0}" max="${j.payload.epochs}"></progress>${m?`<p>${m.epoch}/${j.payload.epochs} · loss ${m.train.loss.toFixed(3)} · 검증 IoU ${(m.val.lane_miou*100).toFixed(1)}% · 주황 ${(m.val.iou[1]*100).toFixed(1)}% / 점선 ${(m.val.iou[2]*100).toFixed(1)}%</p>`:''}${best?`<p>최고 epoch ${best.epoch} · 검증 IoU ${(best.val.lane_miou*100).toFixed(1)}% · 시작 모델 ${j.payload.model==='fresh'?'ImageNet 초기 가중치':escape(state.models.find(x=>x.id===j.payload.model)?.name)}</p>`:''}`:`<p>${j.result?.completed??0}/${(j.payload.image_count??j.payload.images?.length??0)}장 · 실패 ${j.result?.errors?.length??0}</p>`}${j.error?`<p class="error">${escape(j.error)}</p>`:''}${j.result?.errors?.length?`<p class="error">${escape(j.result.errors.map(e=>e.error).join('\n'))}</p>`:''}${j.result?.test?`<p>최종 eval IoU ${(j.result.test.lane_miou*100).toFixed(1)}% · 모델 선택에는 미사용</p>`:''}${mId?`<button data-use-model="${mId}">이 모델로 추론하기</button> <button data-retry-model="${mId}">대기 ${state.images.filter(i=>i.status==='retry').length}장 재추론</button>`:''}</div>`;}).join(''):'<p class="muted">아직 실행한 작업이 없습니다. 모델로 라벨 초안을 만들어보세요.</p>';$$('[data-use-model]').forEach(b=>b.onclick=()=>{$('#model').value=b.dataset.useModel;toast('추론 모델을 선택했습니다.');});$$('[data-retry-model]').forEach(b=>b.onclick=safe(()=>submitInfer(state.images.filter(i=>i.status==='retry').map(i=>i.id),b.dataset.retryModel)));}
+let refreshToken=0;
+function applyImage(row){
+ ++refreshToken; // A poll started before this save must not restore the old label.
+ const index=state.images.findIndex(i=>i.id===row.id);
+ if(index>=0)state.images[index]={...state.images[index],...row};
+ if(current?.id===row.id)current={...current,...row};
+}
+async function refresh(){
+ const token=++refreshToken,oldJobs=state.jobs,nextState=await api('/state?compact=true'+(current?'&image_id='+encodeURIComponent(current.id):''));if(token!==refreshToken)return;
+ state=nextState;$('#connection').textContent='● 서버 연결됨';renderList();modelOptions();renderJobs();renderAllInfer();
+ if(!current)return;
+ const row=state.images.find(i=>i.id===current.id);if(!row)return;
+ const changed=row.current!==activeRevision||row.prediction!==current.prediction;
+ current={...row};updateHeading();
+ const completed=state.jobs.some(j=>j.kind==='infer'&&j.state==='complete'&&oldJobs.some(o=>o.id===j.id&&o.state!=='complete')&&(j.payload.current_image===current.id||j.payload.images?.includes(current.id)));
+ if((changed||completed)&&!busy&&!dirty&&!dragging&&!polygon.length&&view==='current'&&!$('#revision').value)await loadImage(current.id,false);
+ else $('#syncNotice').hidden=row.current===activeRevision;
+}
 async function loadPicture(url){const im=new Image();im.src=url;await im.decode();return im;}
 async function readMask(revision,w,h){if(!revision)return new Uint8Array(w*h);const im=await loadPicture('api/revisions/'+revision+'/mask');const c=document.createElement('canvas');c.width=w;c.height=h;const x=c.getContext('2d',{willReadFrequently:true});x.drawImage(im,0,0);const raw=x.getImageData(0,0,w,h).data;return Uint8Array.from({length:w*h},(_,i)=>raw[4*i]);}
 async function loadImage(id,fit=true){
  const token=++loadToken,row=state.images.find(i=>i.id===id);if(!row)return;
  const [im,revs]=await Promise.all([loadPicture('api/images/'+id+'/file'),api('/images/'+id+'/revisions')]);
  const saved=revs.find(r=>r.id===row.current),pred=revs.find(r=>r.id===row.prediction);
- const display=pred&&!(saved?.kind==='edited'&&saved.created>=pred.created)?pred.id:row.current;
+ const display=saved&&(row.status==='approved'||saved.kind==='edited')?saved.id:(pred?.id??row.current);
  const arr=await readMask(display,row.width,row.height);if(token!==loadToken)return;
  current={...row};image=im;mask=arr;activeRevision=row.current;shownRevision=editorRevision=display;
  view='current';dirty=false;undo=[];redo=[];polygon=[];overlay.width=row.width;overlay.height=row.height;
- $('#empty').style.display='none';
+ $('#empty').style.display='none';$('#syncNotice').hidden=true;
  $('#revision').innerHTML='<option value="">현재 편집 화면</option>'+revs.map(r=>`<option value="${r.id}">${r.kind==='prediction'?'예측':r.kind==='edited'?'수정':'원본 라벨'} · ${new Date(r.created*1000).toLocaleString('ko-KR')}${r.model?' · '+(state.models.find(m=>m.id===r.model)?.name??''):''}</option>`).join('');
  updateHeading();setViewButtons();renderList();if(fit)fitImage();else render();
 }
@@ -61,8 +80,25 @@ canvas.onpointerup=()=>{dragging=false;pan=false;};canvas.onpointercancel=canvas
 canvas.addEventListener('wheel',e=>{e.preventDefault();if(e.shiftKey){$('#brush').value=Math.max(1,Math.min(80,Number($('#brush').value)+(e.deltaY<0?2:-2)));$('#brush').oninput();return;}if(!image)return;const p=point(e),factor=e.deltaY<0?1.12:1/1.12,nextScale=Math.max(.05,Math.min(15,scale*factor));tx+=(scale-nextScale)*p[0];ty+=(scale-nextScale)*p[1];scale=nextScale;render();},{passive:false});
 function finishPolygon(){if(polygon.length<3||!canEdit())return;pushUndo();const c=document.createElement('canvas');c.width=current.width;c.height=current.height;const x=c.getContext('2d');x.beginPath();polygon.forEach(([a,b],i)=>i?x.lineTo(a,b):x.moveTo(a,b));x.closePath();x.fillStyle='white';x.fill();const a=x.getImageData(0,0,c.width,c.height).data;for(let i=0;i<mask.length;i++)if(a[i*4+3]>=128)mask[i]=cls;polygon=[];changed();}
 function encodeMask(){const c=document.createElement('canvas');c.width=current.width;c.height=current.height;const x=c.getContext('2d'),d=x.createImageData(c.width,c.height);for(let i=0;i<mask.length;i++){d.data[i*4]=d.data[i*4+1]=d.data[i*4+2]=mask[i];d.data[i*4+3]=255;}x.putImageData(d,0,0);return c.toDataURL('image/png');}
-async function save(force=false){if(polygon.length)throw Error('F로 폴리곤을 완성하거나 Esc로 취소하세요.');if(!current||(!dirty&&!force))return;if(view!=='current'||$('#revision').value)throw Error('모델 예측 화면으로 돌아와 저장하세요.');if(polygon.length)throw Error('F로 폴리곤을 완성하거나 Esc로 취소하세요.');const r=await api('/images/'+current.id+'/mask',{mask:encodeMask(),expected_revision:activeRevision});activeRevision=editorRevision=shownRevision=r.revision;current.current=r.revision;dirty=false;updateHeading();}
-async function action(status){if(!current||busy)return;if(status==='approved'&&(view!=='current'||$('#revision').value))throw Error('모델 예측 화면에서 승인하세요.');const rows=filtered(),index=rows.findIndex(i=>i.id===current.id),following=rows[index+1]?.id;busy=true;try{await save(status==='approved'&&(!activeRevision||shownRevision!==activeRevision));await api('/images/'+current.id+'/status',{status});await refresh();if(following)await loadImage(following);else{const remaining=filtered().find(i=>i.id!==current.id);if(remaining)await loadImage(remaining.id);else clearEditor();}}finally{busy=false;}}
+async function save(force=false,approve=false){if(polygon.length)throw Error('F로 폴리곤을 완성하거나 Esc로 취소하세요.');if(!current||(!dirty&&!force))return;if(view!=='current'||$('#revision').value)throw Error('모델 예측 화면으로 돌아와 저장하세요.');let r;try{r=await api('/images/'+current.id+'/mask',{mask:encodeMask(),expected_revision:activeRevision,approve});}catch(error){if(error.status===409)throw labelConflict();throw error;}activeRevision=editorRevision=shownRevision=r.revision;applyImage(r.image??{...current,current:r.revision,status:'editing'});dirty=false;$('#syncNotice').hidden=true;updateHeading();return r;}
+async function action(status){
+ if(!current||busy)return;
+ if(status==='approved'&&(view!=='current'||$('#revision').value))throw Error('모델 예측 화면에서 승인하세요.');
+ const id=current.id,rows=filtered(),index=rows.findIndex(i=>i.id===id),following=rows[index+1]?.id,button=$('#approveBtn'),label=button.innerHTML;
+ busy=true;button.disabled=true;button.textContent='저장 중…';
+ try{
+  const saved=await save(status==='approved'&&(!activeRevision||shownRevision!==activeRevision),status==='approved');
+  if(status!=='approved'||saved?.image?.status!=='approved'){
+   const result=await api('/images/'+id+'/status',{status,expected_revision:activeRevision});
+   applyImage(result.image??{...current,status});
+  }
+  // The response confirms durable local storage; the next poll refreshes global statistics.
+  const remaining=filtered(),next=remaining.find(i=>i.id===following)??remaining.find(i=>i.id!==id);
+  renderList();renderAllInfer();
+  if(next)await loadImage(next.id);else clearEditor();
+ }catch(error){if(error.status===409)throw labelConflict();throw error;}
+ finally{busy=false;button.disabled=false;button.innerHTML=label;}
+}
 async function submitInfer(ids,model=$('#model').value){if(!ids.length)throw Error('추론할 이미지를 선택하세요.');if(!model)throw Error('모델을 등록하세요.');await save();await api('/infer',{model,images:ids});toast(`${ids.length}장을 추론 대기열에 넣었습니다.`);await refresh();}
 async function setView(mode){
  if(!current)return;await save();view=mode;
@@ -73,7 +109,13 @@ function setViewButtons(){for(const [id,v]of [['#viewCurrent','current'],['#view
 
 function setTool(t){tool=t;polygon=[];$$('[data-tool]').forEach(b=>b.classList.toggle('active',b.dataset.tool===t));render();}
 function setClass(n){cls=n;$$('[data-class]').forEach(b=>b.classList.toggle('active',Number(b.dataset.class)===n));}
-function clearEditor(){current=image=mask=null;activeRevision=shownRevision=editorRevision=null;dirty=false;undo=[];redo=[];polygon=[];loadToken++;ctx.clearRect(0,0,canvas.width,canvas.height);$('#imageName').textContent='이 목록의 작업을 마쳤습니다';$('#imageState').textContent='';$('#position').textContent='';$('#dirtyLabel').textContent='';$('#empty').textContent='완료한 이미지는 데이터셋에 보관됩니다. 필터에서 다시 볼 수 있습니다.';$('#empty').style.display='flex';}
+function clearEditor(){current=image=mask=null;activeRevision=shownRevision=editorRevision=null;dirty=false;undo=[];redo=[];polygon=[];loadToken++;$('#syncNotice').hidden=true;ctx.clearRect(0,0,canvas.width,canvas.height);$('#imageName').textContent='이 목록의 작업을 마쳤습니다';$('#imageState').textContent='';$('#position').textContent='';$('#dirtyLabel').textContent='';$('#empty').textContent='완료한 이미지는 데이터셋에 보관됩니다. 필터에서 다시 볼 수 있습니다.';$('#empty').style.display='flex';}
+$('#reloadLabelBtn').onclick=safe(async()=>{
+ if(!current||busy)return;
+ if((dirty||polygon.length)&&!window.confirm('내가 저장하지 않은 수정을 버리고 서버의 최신 라벨을 불러올까요?'))return;
+ const id=current.id;busy=true;
+ try{await refresh();await loadImage(id,false);}finally{busy=false;}
+});
 $('#filter').onchange=safe(async()=>{
  // Serialize filter navigation behind save/delete/next so an earlier image
  // request cannot replace the newly selected archive or completed view.

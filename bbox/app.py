@@ -39,9 +39,13 @@ def initialize():
         CREATE TABLE IF NOT EXISTS jobs(id TEXT PRIMARY KEY,kind TEXT,state TEXT,payload TEXT,result TEXT,error TEXT,created REAL);''')
         c.execute("UPDATE jobs SET state='interrupted' WHERE state IN ('running','queued')")
     for d in ('images','labels','history','metadata'):(ROOT/'deleted'/d).mkdir(parents=True,exist_ok=True)
-    traffic=HERE/'models/yolo26n_red_green_200ep.pt'
-    if traffic.is_file() and not query('SELECT id FROM models WHERE path=?',(str(traffic),),True):
-        write('INSERT INTO models VALUES(?,?,?)',('red_green_200ep','YOLO26 Nano · red / green · 200 epochs',str(traffic)))
+    for model_id,name,filename in (
+        ('best','best.pt · YOLO26 Nano · 전체 클래스','best.pt'),
+        ('red_green_200ep','YOLO26 Nano · red / green · 200 epochs','yolo26n_red_green_200ep.pt'),
+    ):
+        path=HERE/'models'/filename
+        if path.is_file() and not query('SELECT id FROM models WHERE path=?',(str(path),),True):
+            write('INSERT INTO models VALUES(?,?,?)',(model_id,name,str(path)))
 def item(i):
     r=query('SELECT * FROM images WHERE id=?',(i,),True)
     if not r:raise HTTPException(404,'Image not found')
@@ -129,7 +133,7 @@ def state():
         image['label_class_counts']=list(revision_class_counts(image['current'])) if image['current'] else [0]*len(NAMES)
         image['label_box_count']=sum(image['label_class_counts']) if image['current'] else None
     models=query('SELECT * FROM models')
-    default_model='red_green_200ep' if any(m['id']=='red_green_200ep' for m in models) else (models[0]['id'] if models else None)
+    default_model=next((name for name in ('best','red_green_200ep') if any(m['id']==name for m in models)),models[0]['id'] if models else None)
     return {'images':images,'models':models,'default_model':default_model,'jobs':jobs,'classes':NAMES,'default_folder':str(ROOT/'unlabeled')}
 @app.post('/api/import')
 def import_images(body:Import):
@@ -238,9 +242,9 @@ def snapshot(seed:int=31):
         atomic(ROOT/'_store/registry.json',registry);sync()
         pool=sorted([r for r in rows if entries[r['origin']]['group']=='pool'],key=lambda r:r['origin']);evaluation=sorted([r for r in rows if entries[r['origin']]['group']=='eval'],key=lambda r:r['origin'])
         if len(pool)<2 or not evaluation:raise HTTPException(400,'train/val 및 eval 이미지가 필요합니다')
-        random.Random(seed).shuffle(pool);cut=max(1,min(len(pool)-1,round(len(pool)*.75)))
+        assignments=dataset_layout.split_assignments(rows,entries,seed)
         dest=ROOT/'_store/versions'/uid();samples=[];seen=set()
-        for split,part in [('train',pool[:cut]),('val',pool[cut:]),('test',evaluation)]:
+        for split,part in [('train',[r for r in pool if assignments[r['id']]=='train']),('val',[r for r in pool if assignments[r['id']]=='test']),('test',evaluation)]:
             for r in part:
                 digest=hashlib.sha256(Path(r['path']).read_bytes()).hexdigest()
                 if digest!=r['digest'] or digest in seen:raise HTTPException(409,'변경되었거나 중복된 이미지')
