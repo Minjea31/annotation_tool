@@ -14,7 +14,7 @@ async function editor({predicted=false,edited=false,insecure=false,stateFailures
  const labels={prediction:[box],edited:[editedBox]};
  if(edited){row.current='edited';revisions.push({id:'edited',kind:'edited',created:2});}
  const strokes=[],texts=[],requests=[],elements=new Map(),listeners={};
- let pollCallback,stateGate,releaseState;
+ let pollCallback,stateGate,releaseState,conditional=false;
  const context={clearRect(){strokes.length=0;texts.length=0;},save(){},restore(){},translate(){},scale(){},drawImage(){},fillRect(){},strokeRect(...args){strokes.push(args);},fillText(s){texts.push(s);},measureText(s){return {width:s.length*7};}};
  function element(id){
   if(!elements.has(id))elements.set(id,{value:id==='filter'?'pending':id==='confidence'?'0.25':id==='model'?'baseline':'',options:[],dataset:{},style:{},clientWidth:900,clientHeight:700,
@@ -26,22 +26,27 @@ async function editor({predicted=false,edited=false,insecure=false,stateFailures
   document:{querySelector(s){return s==='dialog[open]'?null:element(s.slice(1));},querySelectorAll(){return [];},addEventListener(type,callback){listeners[type]=callback;}},
   async fetch(url,options={}){
    requests.push({url,...options});
-   let value;
+   let value,etag=null;
    if(url==='api/state'){
     if(stateFailures>0){stateFailures--;throw Error('Temporary connection failure');}
     if(stateGate)await stateGate;
     value=data;
+    if(conditional){
+     etag='"'+require('node:crypto').createHash('sha256').update(JSON.stringify(data)).digest('hex')+'"';
+     if(options.headers?.['If-None-Match']===etag)return {status:304};
+    }
    }
    else if(url==='api/infer')value={job:'queued'};
    else if(/^api\/images\/[^/]+\/revisions$/.test(url))value=revisions;
    else if(url.startsWith('api/revisions/'))value=labels[url.split('/')[2]];
    else throw Error('Unexpected request: '+url);
-   return {ok:true,json:async()=>structuredClone(value)};
+   return {ok:true,status:200,headers:{get(name){return name==='ETag'?etag:null;}},json:async()=>structuredClone(value)};
   }};
  vm.createContext(sandbox);
  vm.runInContext(fs.readFileSync(path.join(__dirname,'static/app.js'),'utf8'),sandbox);
  await new Promise(resolve=>setImmediate(resolve));
  return {data,row,revisions,labels,box,strokes,texts,requests,element,
+  conditional(){conditional=true;},
   poll:()=>pollCallback(),
   holdState(){stateGate=new Promise(resolve=>{releaseState=resolve;});},
   releaseState(){releaseState();stateGate=null;},
@@ -356,4 +361,21 @@ test('changing approved class opens a matching image for review',async()=>{
  await ui.element('approvedClass').onchange();
  assert.equal(ui.run('current.id'),'small');
  assert.equal(ui.element('name').textContent,'alpha.png');
+});
+
+
+test('unchanged conditional polls keep the list and still load a deferred prediction',async()=>{
+ const ui=await editor({predicted:true});ui.conditional();
+ ui.run('dirty=true;boxes[0].x1=45;render()');
+ ui.predict('new-prediction',[{...ui.box,x1:60}]);
+ await ui.run('refresh()');
+ const list=ui.element('images').innerHTML;
+ // A marker detects a redundant rebuild of the unchanged image list.
+ ui.element('images').innerHTML='unchanged list';
+ await ui.run('refresh()');
+ assert.equal(ui.element('images').innerHTML,'unchanged list');
+ assert.equal(ui.strokes[0][0],45);
+ ui.run('dirty=false');await ui.run('refresh()');
+ assert.equal(ui.strokes[0][0],60);
+ assert.ok(ui.requests.some(r=>r.headers?.['If-None-Match']));
 });

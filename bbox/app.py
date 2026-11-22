@@ -1,9 +1,10 @@
 """Independent bbox review storage; original segmentation data is never imported here."""
 import hashlib, json, math, os, random, re, shutil, sqlite3, subprocess, sys, threading, time, uuid
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import closing
 from functools import lru_cache
 from pathlib import Path
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
@@ -11,6 +12,8 @@ from PIL import Image
 from .engine import NAMES, load
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]))
 import dataset_layout
+from annotation_state import StateCache
+STATE_CACHE=StateCache()
 HERE=Path(__file__).resolve().parent
 ROOT=Path(os.environ.get('BBOX_REVIEW_DATA', HERE/'dataset')).resolve()
 WORK=Path(os.environ.get('BBOX_REVIEW_WORK', ROOT/'_store/review')).resolve()
@@ -18,13 +21,13 @@ LOCK=threading.RLock(); POOL=ThreadPoolExecutor(max_workers=1)
 app=FastAPI()
 def uid():return uuid.uuid4().hex
 def query(sql,args=(),one=False):
-    with sqlite3.connect(WORK/'review.sqlite',timeout=30) as c:
+    with closing(sqlite3.connect(WORK/'review.sqlite',timeout=30)) as c:
         c.row_factory=sqlite3.Row
         rows=[dict(r) for r in c.execute(sql,args).fetchall()]
     return (rows[0] if rows else None) if one else rows
 
 def write(sql,args=()):
-    with sqlite3.connect(WORK/'review.sqlite',timeout=30) as c:c.execute(sql,args)
+    with closing(sqlite3.connect(WORK/'review.sqlite',timeout=30)) as c, c:c.execute(sql,args)
 def atomic(path,data):
     path.parent.mkdir(parents=True,exist_ok=True); temp=path.with_name('.'+uid()); temp.write_text(json.dumps(data,indent=2));temp.replace(path)
 def copy(src,dst):
@@ -32,20 +35,20 @@ def copy(src,dst):
 def initialize():
     WORK.mkdir(parents=True,exist_ok=True)
     for d in ('images','labels','runs','logs'):(WORK/d).mkdir(exist_ok=True)
-    with sqlite3.connect(WORK/'review.sqlite') as c:
+    with closing(sqlite3.connect(WORK/'review.sqlite')) as c, c:
+        c.execute('PRAGMA journal_mode=WAL')
         c.executescript('''CREATE TABLE IF NOT EXISTS images(id TEXT PRIMARY KEY,name TEXT,path TEXT,digest TEXT UNIQUE,origin TEXT UNIQUE,session TEXT,width INT,height INT,status TEXT,current TEXT,prediction TEXT);
         CREATE TABLE IF NOT EXISTS revisions(id TEXT PRIMARY KEY,image_id TEXT,kind TEXT,path TEXT,model TEXT,created REAL);
         CREATE TABLE IF NOT EXISTS models(id TEXT PRIMARY KEY,name TEXT,path TEXT UNIQUE);
-        CREATE TABLE IF NOT EXISTS jobs(id TEXT PRIMARY KEY,kind TEXT,state TEXT,payload TEXT,result TEXT,error TEXT,created REAL);''')
+        CREATE TABLE IF NOT EXISTS jobs(id TEXT PRIMARY KEY,kind TEXT,state TEXT,payload TEXT,result TEXT,error TEXT,created REAL);
+        CREATE INDEX IF NOT EXISTS revisions_image_created ON revisions(image_id,created DESC);
+        CREATE INDEX IF NOT EXISTS images_session_name ON images(session,name);''')
         c.execute("UPDATE jobs SET state='interrupted' WHERE state IN ('running','queued')")
     for d in ('images','labels','history','metadata'):(ROOT/'deleted'/d).mkdir(parents=True,exist_ok=True)
-    for model_id,name,filename in (
-        ('best','best.pt · YOLO26 Nano · 전체 클래스','best.pt'),
-        ('red_green_200ep','YOLO26 Nano · red / green · 200 epochs','yolo26n_red_green_200ep.pt'),
-    ):
-        path=HERE/'models'/filename
-        if path.is_file() and not query('SELECT id FROM models WHERE path=?',(str(path),),True):
-            write('INSERT INTO models VALUES(?,?,?)',(model_id,name,str(path)))
+    path=HERE/'models/best.pt'
+    if path.is_file() and not query('SELECT id FROM models WHERE path=?',(str(path),),True):
+        write('INSERT INTO models VALUES(?,?,?)',('best','최신 모델 · YOLO26 Nano',str(path)))
+
 def item(i):
     r=query('SELECT * FROM images WHERE id=?',(i,),True)
     if not r:raise HTTPException(404,'Image not found')
@@ -69,35 +72,40 @@ def revision(i,b,kind='edited',model=None):
 def txt(b,w,h):
     return ''.join(f"{r['class_id']} {(r['x1']+r['x2'])/2/w:.9f} {(r['y1']+r['y2'])/2/h:.9f} {(r['x2']-r['x1'])/w:.9f} {(r['y2']-r['y1'])/h:.9f}\n" for r in b)
 def eligible():return query("SELECT * FROM images WHERE current IS NOT NULL AND status IN ('editing','approved')")
-def sync():
+def sync(changed_ids=None):
     root=ROOT/'_store/pending';old=json.loads((root/'manifest.json').read_text()) if (root/'manifest.json').exists() else {'samples':[]}
+    previous={r['id']:r for r in old['samples']}
     registry=read_registry();samples=[]
     for r in eligible():
         e=registry['entries'].get(r['origin'])
         if e and e['revision']==r['current']:continue
         image=f"images/{r['id']}{Path(r['path']).suffix}"; label=f"labels/{r['id']}.txt"
-        copy(r['path'],root/image);p=root/label;p.parent.mkdir(parents=True,exist_ok=True);p.write_text(txt(boxes(r['current']),r['width'],r['height']))
+        if not (root/image).is_file():copy(r['path'],root/image)
+        prior=previous.get(r['id'])
+        if not prior or prior['revision']!=r['current'] or not (root/label).is_file():
+            p=root/label;p.parent.mkdir(parents=True,exist_ok=True);p.write_text(txt(boxes(r['current']),r['width'],r['height']))
         samples.append({**r,'image':image,'label':label,'revision':r['current']})
-    atomic(root/'manifest.json',{'names':NAMES,'samples':samples})
+    metadata={'names':NAMES,'samples':samples}
+    if old!=metadata:atomic(root/'manifest.json',metadata)
     keep={r['id'] for r in samples}
     for r in old['samples']:
         if r['id'] not in keep:
             for k in ('image','label'):
                 p=(root/r[k]).resolve()
                 if p.is_relative_to(root.resolve()):p.unlink(missing_ok=True)
-    publish_layout()
-def publish_layout(seed=None):
+    publish_layout(changed_ids=changed_ids)
+def publish_layout(seed=None,changed_ids=None):
     with LOCK:
-        return _publish_layout(seed)
+        return _publish_layout(seed,changed_ids)
 
-def _publish_layout(seed=None):
+def _publish_layout(seed=None,changed_ids=None):
     samples=[]
     for r in eligible():
         p=WORK/'labels'/f"{r['current']}.txt"
         if not p.exists():p.write_text(txt(boxes(r['current']),r['width'],r['height']))
         samples.append({'id':r['id'],'origin':r['origin'],'sha256':r['digest'],'revision':r['current'],'image':r['path'],'label':str(p)})
     unlabeled=[{'id':r['id'],'image':r['path']} for r in query("SELECT * FROM images WHERE status IN ('unreviewed','retry')")]
-    return dataset_layout.publish(ROOT,samples,unlabeled,ROOT/'_store/registry.json','labels',seed=seed)
+    return dataset_layout.publish(ROOT,samples,unlabeled,ROOT/'_store/registry.json','labels',seed=seed,changed_ids=changed_ids)
 def read_registry():
     p=ROOT/'_store/registry.json'
     return json.loads(p.read_text()) if p.exists() else {'id':uid(),'entries':{},'hash_groups':{}}
@@ -106,8 +114,8 @@ class Box(BaseModel):
     id:str
     class_id:int=Field(ge=0,lt=len(NAMES))
     x1:float;y1:float;x2:float;y2:float
-class Save(BaseModel):boxes:list[Box];expected_revision:str|None=None
-class Status(BaseModel):status:str
+class Save(BaseModel):boxes:list[Box];expected_revision:str|None=None;approve:bool=False
+class Status(BaseModel):status:str;expected_revision:str|None=None
 class Apply(BaseModel):revision:str
 class Infer(BaseModel):
     model:str
@@ -115,9 +123,14 @@ class Infer(BaseModel):
     confidence:float=Field(default=.25,gt=0,le=1)
 class Model(BaseModel):path:str;name:str=''
 class Train(BaseModel):
-    model:str='red_green_200ep';epochs:int=Field(default=20,ge=1,le=1000);batch_size:int=Field(default=4,ge=1,le=32)
+    model:str='best';epochs:int=Field(default=20,ge=1,le=1000);batch_size:int=Field(default=4,ge=1,le=32)
     lr:float=Field(default=.0001,gt=0,le=.1);seed:int=31
-@app.get('/api/state')
+def client_image(image):
+    image['prediction_box_count']=prediction_box_count(image['prediction']) if image['prediction'] else None
+    image['label_class_counts']=list(revision_class_counts(image['current'])) if image['current'] else [0]*len(NAMES)
+    image['label_box_count']=sum(image['label_class_counts']) if image['current'] else None
+    return image
+
 def state():
     jobs=query('SELECT * FROM jobs ORDER BY created DESC LIMIT 30')
     for j in jobs:
@@ -128,13 +141,13 @@ def state():
                 try:j['metrics'].append(json.loads(line))
                 except ValueError:pass
     images=query('SELECT * FROM images ORDER BY session,name')
-    for image in images:
-        image['prediction_box_count']=prediction_box_count(image['prediction']) if image['prediction'] else None
-        image['label_class_counts']=list(revision_class_counts(image['current'])) if image['current'] else [0]*len(NAMES)
-        image['label_box_count']=sum(image['label_class_counts']) if image['current'] else None
+    images=[client_image(image) for image in images]
     models=query('SELECT * FROM models')
-    default_model=next((name for name in ('best','red_green_200ep') if any(m['id']==name for m in models)),models[0]['id'] if models else None)
+    default_model=next((name for name in ('best',) if any(m['id']==name for m in models)),models[0]['id'] if models else None)
     return {'images':images,'models':models,'default_model':default_model,'jobs':jobs,'classes':NAMES,'default_folder':str(ROOT/'unlabeled')}
+@app.get('/api/state')
+def get_state(request:Request):
+    return STATE_CACHE.response(request,WORK,ROOT/'_store/registry.json',state)
 @app.post('/api/import')
 def import_images(body:Import):
     src=Path(body.path).expanduser().resolve()
@@ -176,22 +189,23 @@ def save(i:str,body:Save):
         if len({v['id'] for v in b})!=len(b):raise HTTPException(400,'Duplicate box ID')
         for v in b:
             if not all(math.isfinite(v[k]) for k in ('x1','y1','x2','y2')) or not (0<=v['x1']<v['x2']<=r['width'] and 0<=v['y1']<v['y2']<=r['height']):raise HTTPException(400,'박스 좌표가 이미지 범위를 벗어났습니다')
-        rev=revision(i,b);write("UPDATE images SET current=?,status='editing' WHERE id=?",(rev,i));sync()
-    return {'revision':rev}
+        rev=revision(i,b);write('UPDATE images SET current=?,status=? WHERE id=?',(rev,'approved' if body.approve else 'editing',i));sync({i})
+        return {'revision':rev,'image':client_image(item(i))}
 @app.post('/api/images/{i}/status')
 def status(i:str,body:Status):
     with LOCK:
         r=item(i);editable(r)
+        if 'expected_revision' in body.model_fields_set and body.expected_revision!=r['current']:raise HTTPException(409,'라벨이 변경되었습니다. 다시 불러오세요')
         if body.status not in ('approved','retry','excluded','unreviewed'):raise HTTPException(400,'Unknown status')
         if body.status=='approved' and not r['current']:raise HTTPException(400,'먼저 라벨을 저장하세요')
-        write('UPDATE images SET status=? WHERE id=?',(body.status,i));sync()
-    return {'ok':True}
+        write('UPDATE images SET status=? WHERE id=?',(body.status,i));sync({i})
+        return {'ok':True,'image':client_image(item(i))}
 @app.post('/api/images/{i}/apply')
 def apply(i:str,body:Apply):
     with LOCK:
         editable(item(i));r=query('SELECT * FROM revisions WHERE id=? AND image_id=?',(body.revision,i),True)
         if not r:raise HTTPException(404,'Revision not found')
-        rev=revision(i,boxes(body.revision));write("UPDATE images SET current=?,status='editing' WHERE id=?",(rev,i));sync()
+        rev=revision(i,boxes(body.revision));write("UPDATE images SET current=?,status='editing' WHERE id=?",(rev,i));sync({i})
     return {'revision':rev}
 @app.post('/api/images/{i}/delete')
 def delete(i:str):
@@ -201,7 +215,7 @@ def delete(i:str):
         for rev in revs:copy(rev['path'],root/'history'/i/Path(rev['path']).name)
         if r['current']:
             p=root/'labels'/f'{i}.txt';p.parent.mkdir(parents=True,exist_ok=True);p.write_text(txt(boxes(r['current']),r['width'],r['height']))
-        atomic(root/'metadata'/f'{i}.json',{**r,'revisions':revs});write("UPDATE images SET status='deleted' WHERE id=?",(i,));sync()
+        atomic(root/'metadata'/f'{i}.json',{**r,'revisions':revs});write("UPDATE images SET status='deleted' WHERE id=?",(i,));sync({i})
     return {'ok':True}
 def model(i):
     r=query('SELECT * FROM models WHERE id=?',(i,),True)

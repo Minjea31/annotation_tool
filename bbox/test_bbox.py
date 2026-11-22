@@ -56,31 +56,31 @@ class ReviewTest(unittest.TestCase):
   self.assertFalse(src.exists());self.assertTrue((b.ROOT/'_store/source_inputs/new.png').exists())
  def test_inference_retains_edit(self):
   r=self.rows[0];rev=self.save(r)['revision']
-  b.run('missing','infer',{'model':'red_green_200ep','images':[r['id']]})
+  b.run('missing','infer',{'model':'best','images':[r['id']]})
   row=b.item(r['id']);self.assertEqual(row['current'],rev);self.assertIsNotNone(row['prediction']);self.assertEqual(b.boxes(rev),[])
  def test_confidence_validation(self):
   from pydantic import ValidationError
-  self.assertEqual(b.Infer(model='red_green_200ep',images=['image']).confidence,.25)
-  for value in (.01,.6,1):self.assertEqual(b.Infer(model='red_green_200ep',images=['image'],confidence=value).confidence,value)
+  self.assertEqual(b.Infer(model='best',images=['image']).confidence,.25)
+  for value in (.01,.6,1):self.assertEqual(b.Infer(model='best',images=['image'],confidence=value).confidence,value)
   for value in (0,-.1,1.01,float('nan'),float('inf')):
-   with self.assertRaises(ValidationError):b.Infer(model='red_green_200ep',images=['image'],confidence=value)
+   with self.assertRaises(ValidationError):b.Infer(model='best',images=['image'],confidence=value)
  def test_state_distinguishes_uninferred_empty_and_detected_images(self):
   empty,detected=self.rows[:2]
   box={'id':'box','class_id':0,'x1':4,'y1':5,'x2':40,'y2':30}
   for row,values in ((empty,[]),(detected,[box])):
-   rev=b.revision(row['id'],values,'prediction','red_green_200ep')
+   rev=b.revision(row['id'],values,'prediction','best')
    b.write('UPDATE images SET prediction=?,current=? WHERE id=?',(rev,rev,row['id']))
   counts={r['id']:r['prediction_box_count'] for r in b.state()['images']}
   self.assertEqual(counts[empty['id']],0)
   self.assertEqual(counts[detected['id']],1)
   self.assertIsNone(counts[self.rows[2]['id']])
-  rev=b.revision(detected['id'],[],'prediction','red_green_200ep')
+  rev=b.revision(detected['id'],[],'prediction','best')
   b.write('UPDATE images SET prediction=? WHERE id=?',(rev,detected['id']))
   counts={r['id']:r['prediction_box_count'] for r in b.state()['images']}
   self.assertEqual(counts[detected['id']],0)
  def test_saved_label_counts_use_current_revision_and_update_after_edit(self):
   row=self.rows[0];box={'id':'first','class_id':0,'x1':4,'y1':5,'x2':40,'y2':30}
-  pred=b.revision(row['id'],[box],'prediction','red_green_200ep')
+  pred=b.revision(row['id'],[box],'prediction','best')
   b.write('UPDATE images SET prediction=? WHERE id=?',(pred,row['id']))
   edited=[{**box,'class_id':2},{**box,'id':'second','class_id':2},{**box,'id':'third','class_id':5}]
   rev=self.save(row,edited)['revision']
@@ -99,14 +99,14 @@ class ReviewTest(unittest.TestCase):
   r=self.rows[0]
   for setting,expected in (({'confidence':.6},.6),({},.25)):
    with patch.object(b,'load',return_value=detector):
-    b.run('missing','infer',{'model':'red_green_200ep','images':[r['id']],**setting})
+    b.run('missing','infer',{'model':'best','images':[r['id']],**setting})
    detector.predict.assert_called_with(r['path'],imgsz=640,conf=expected,verbose=False)
    self.assertIsNotNone(b.item(r['id'])['prediction'])
 class ModelCompatibilityTest(unittest.TestCase):
  def test_head_expansion_preserves_named_classes(self):
   import torch
   from bbox.engine import load,reorder,NAMES
-  source=Path(__file__).parent/'models/yolo26n_red_green_200ep.pt'
+  source=Path(__file__).parent/'models/best.pt'
   original=load(source)
   with tempfile.TemporaryDirectory() as temp:
    converted=load(reorder(source,Path(temp)/'expanded.pt'))

@@ -1,12 +1,13 @@
 {
   "file": "best.pt",
   "architecture": "MobileNetV3-Small U-Net",
-  "source": "5dcbf23de1794df3a77c9e4e402fb916",
-  "validation_lane_miou": 0.956,
+  "source": "7f5bd87c3fc045cb81254d257c5884b8",
+  "validation_lane_miou": 0.9548466133369424,
+  "eval_lane_miou": 0.9483572735981456,
   "classes": [
     "background",
     "orange_lane",
     "white_dashed_lane"
   ],
-  "sha256": "ecd8dc4f55a89fa94531e13c6117fe491298a6619968e9404252d026c6e11e29"
+  "sha256": "d03b3ad176675643bb735cf82c66f6efc2e6e7f248eba8c71345c3cd3f1c8a82"
 }

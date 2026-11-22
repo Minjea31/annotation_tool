@@ -1,7 +1,7 @@
 """Lane review server with shared local storage. Run with the training Python environment."""
 import base64
 from concurrent.futures import ThreadPoolExecutor
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, closing
 import hashlib
 import io
 import json
@@ -27,6 +27,8 @@ from pydantic import BaseModel, Field
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0,str(HERE.parents[1]))
 import dataset_layout
+from annotation_state import StateCache
+STATE_CACHE = StateCache()
 DATA_ROOT = Path(os.environ.get('ANNOTATION_SEG_DATA', HERE.parent/'dataset')).resolve()
 TRAIN = HERE.parent / 'train'
 sys.path.insert(0, str(TRAIN))
@@ -52,13 +54,13 @@ def db():
 
 
 def query(sql, values=(), one=False):
-    with db() as c:
+    with closing(db()) as c:
         rows = c.execute(sql, values).fetchall()
     return (dict(rows[0]) if rows else None) if one else [dict(r) for r in rows]
 
 
 def update(sql, values=()):
-    with db() as c:
+    with closing(db()) as c, c:
         c.execute(sql, values)
 
 
@@ -125,7 +127,7 @@ def backup_policy_migration():
         return
     destination = root / 'migration_backup'
     destination.mkdir(parents=True)
-    with db() as source, sqlite3.connect(destination / 'review.sqlite') as backup:
+    with closing(db()) as source, closing(sqlite3.connect(destination / 'review.sqlite')) as backup:
         source.backup(backup)
     if (APPROVED / 'manifest.json').exists():
         shutil.copy2(APPROVED / 'manifest.json', destination / 'approve_manifest.json')
@@ -144,7 +146,8 @@ def merge_pending():
 def initialize():
     for name in ['images', 'masks', 'datasets', 'runs', 'logs']:
         (WORK / name).mkdir(parents=True, exist_ok=True)
-    with db() as c:
+    with closing(db()) as c, c:
+        c.execute('PRAGMA journal_mode=WAL')
         c.executescript('''
         CREATE TABLE IF NOT EXISTS images (id TEXT PRIMARY KEY, name TEXT, path TEXT,
           digest TEXT UNIQUE, origin TEXT UNIQUE, session TEXT, split TEXT, width INTEGER,
@@ -155,6 +158,8 @@ def initialize():
         CREATE TABLE IF NOT EXISTS model_policies (model_id TEXT PRIMARY KEY, policy_id TEXT);
         CREATE TABLE IF NOT EXISTS jobs (id TEXT PRIMARY KEY, kind TEXT, state TEXT, payload TEXT,
           result TEXT, error TEXT, created REAL);
+        CREATE INDEX IF NOT EXISTS revisions_image_created ON revisions(image_id,created DESC);
+        CREATE INDEX IF NOT EXISTS images_session_name ON images(session,name);
         ''')
         c.execute("UPDATE jobs SET state='interrupted',error='Server restarted; partial output retained' WHERE state IN ('queued','running')")
     if BASE.exists():
@@ -167,7 +172,7 @@ def initialize():
     if dataset_store.read(dataset_root()) is None and len(eligible_rows()) >= 5:
         merge_pending()
     if INITIAL.exists():
-        register_model(INITIAL, '최신 모델 · MobileNetV3 U-Net · IoU 95.6%')
+        register_model(INITIAL, '최신 모델 · MobileNetV3 U-Net')
 
 
 def register_model(path, name):
@@ -244,7 +249,6 @@ def client_image(row):
     return {key: row[key] for key in IMAGE_FIELDS}
 
 
-@app.get('/api/state')
 def state(compact: bool = False, image_id: str | None = None):
     fields = ','.join(IMAGE_FIELDS) if compact else '*'
     images = query(f'SELECT {fields} FROM images ORDER BY session,name')
@@ -283,6 +287,12 @@ def state(compact: bool = False, image_id: str | None = None):
     return {'images': images, 'models': models, 'jobs': jobs,
             'dataset': {'path': str(dataset_root()), 'policy_id': policy_id, **counts},
             'work': str(WORK), 'approve_folder': str(APPROVED), 'delete_folder': str(DELETED), 'default_folder': str(DATA_ROOT / 'unlabeled')}
+
+
+@app.get('/api/state')
+def get_state(request: Request, compact: bool = False, image_id: str | None = None):
+    return STATE_CACHE.response(request, WORK, dataset_root() / 'registry.json',
+                                lambda: state(compact, image_id))
 
 
 @app.post('/api/import')
@@ -363,7 +373,7 @@ def save_mask(image_id: str, body: SaveRequest):
         rev = revision(image_id, 'edited', path)
         update('UPDATE images SET current=?,status=?,updated=? WHERE id=?',
                (rev, 'approved' if body.approve else 'editing', time.time(), image_id))
-        sync_approved()
+        sync_approved({image_id})
         return {'revision': rev, 'image': client_image(item(image_id))}
 
 
@@ -379,7 +389,7 @@ def set_status(image_id: str, body: StatusRequest):
         if body.status == 'approved' and not row['current']:
             raise HTTPException(400, 'Save a mask first; empty masks may also be approved')
         update('UPDATE images SET status=?,updated=? WHERE id=?', (body.status, time.time(), image_id))
-        sync_approved()
+        sync_approved({image_id})
         return {'ok': True, 'image': client_image(item(image_id))}
 
 
@@ -410,7 +420,7 @@ def delete_image(image_id: str):
         temporary.write_text(json.dumps(metadata, indent=2))
         temporary.replace(metadata_dir / (image_id + '.json'))
         update("UPDATE images SET status='deleted',updated=? WHERE id=?", (time.time(), image_id))
-        sync_approved()
+        sync_approved({image_id})
     return {'ok': True, 'path': str(DELETED), 'image': str(image), 'mask': str(mask) if mask else None}
 
 
@@ -424,7 +434,7 @@ def apply_revision(image_id: str, body: ApplyRequest):
             raise HTTPException(404, 'Revision not found')
         adopted = revision(image_id, 'edited', Path(rev['path']), rev['model'])
         update("UPDATE images SET current=?,status='unreviewed',updated=? WHERE id=?", (adopted, time.time(), image_id))
-        sync_approved()
+        sync_approved({image_id})
     return {'ok': True}
 
 
@@ -476,7 +486,7 @@ def atomic_copy(source, destination):
         temp.unlink(missing_ok=True)
 
 
-def sync_approved():
+def sync_approved(changed_ids=None):
     """Mirror saved edits/approvals; source images and past snapshots stay intact."""
     with LOCK:
         APPROVED.mkdir(parents=True, exist_ok=True)
@@ -505,9 +515,8 @@ def sync_approved():
         metadata = {'classes': ['background', 'orange_lane', 'white_dashed_lane'],
                     'ignore_index': 255, 'samples': samples,
                     'purpose': 'Pending saved/approved revisions; merged into train_dataset on training'}
-        temporary = APPROVED / ('.manifest.' + uid())
-        temporary.write_text(json.dumps(metadata, indent=2))
-        temporary.replace(manifest_path)
+        if old != metadata:
+            dataset_layout.atomic(manifest_path, metadata)
         retained = {r['id'] for r in samples}
         for prior in old['samples']:
             if prior['id'] not in retained:
@@ -515,19 +524,19 @@ def sync_approved():
                     path = (APPROVED / prior[key]).resolve()
                     if path.is_relative_to(APPROVED) and path.name.startswith(prior['id']):
                         path.unlink(missing_ok=True)
-        publish_layout()
+        publish_layout(changed_ids=changed_ids)
         return metadata
 
 
-def publish_layout(seed=None):
+def publish_layout(seed=None, changed_ids=None):
     with LOCK:
-        return _publish_layout(seed)
+        return _publish_layout(seed, changed_ids)
 
-def _publish_layout(seed=None):
+def _publish_layout(seed=None, changed_ids=None):
     rows=eligible_rows()
     samples=[{'id':r['id'],'origin':r['origin'],'sha256':r['digest'],'revision':r['current'],'image':r['path'],'label':r['mask_path']} for r in rows]
     unlabeled=[{'id':r['id'],'image':r['path']} for r in query("SELECT * FROM images WHERE status IN ('unreviewed','retry')")]
-    return dataset_layout.publish(DATA_ROOT,samples,unlabeled,dataset_root()/'registry.json','masks',seed=seed)
+    return dataset_layout.publish(DATA_ROOT,samples,unlabeled,dataset_root()/'registry.json','masks',seed=seed,changed_ids=changed_ids)
 
 
 def snapshot(seed=31):

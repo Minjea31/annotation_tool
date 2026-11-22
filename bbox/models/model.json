@@ -1,10 +1,16 @@
 {
-  "file": "yolo26n_red_green_200ep.pt",
+  "file": "best.pt",
   "architecture": "YOLO26 Nano",
-  "source": "red_green_200ep",
+  "source": "2026-11-18T05:34:41",
   "classes": [
+    "slow",
+    "bump",
+    "crosswalk",
+    "left",
+    "right",
+    "parking",
     "red",
     "green"
   ],
-  "sha256": "c2b39d49797a7d606576e7f3ff52746871731cc72e0675eb901e7941eacf8683"
+  "sha256": "ed0a9a116324ef666ac82a8d962ae7f6355f95b0f10fe35cdda4f59b72c1649e"
 }

@@ -27,11 +27,12 @@ def split_assignments(samples,entries,seed):
  for i,r in enumerate(r for r in pool if r['id'] not in pinned):
   assignments[r['id']]='train' if i<remaining_train else 'test'
  return assignments
-def publish(root,samples,unlabeled,registry_path,label_dir,seed=None):
+def publish(root,samples,unlabeled,registry_path,label_dir,seed=None,changed_ids=None):
  """samples: id/origin/sha256/revision/image/label. Only owned view files are cleaned."""
  root=Path(root);registry_path=Path(registry_path)
  registry=json.loads(registry_path.read_text()) if registry_path.exists() else {'policy':'fixed_eval_v1','id':uuid.uuid4().hex,'eval_seed':31,'entries':{},'hash_groups':{}}
  if seed is None:seed=registry.get('view_seed',31)
+ original_registry=json.dumps(registry,sort_keys=True)
  registry['view_seed']=seed
  entries=registry['entries'];groups=registry.setdefault('hash_groups',{e['sha256']:e['group'] for e in entries.values()})
  unseen=sorted([r for r in samples if r['origin'] not in entries],key=lambda r:hashlib.sha256(('31:'+r['origin']).encode()).hexdigest())
@@ -40,25 +41,31 @@ def publish(root,samples,unlabeled,registry_path,label_dir,seed=None):
   group=groups.get(r['sha256'])
   if group is None:group='eval' if needed>0 else 'pool';needed-=int(group=='eval')
   entries[r['origin']]={'group':group,'sha256':r['sha256'],'revision':None};groups[r['sha256']]=group
- if samples or registry_path.exists():atomic(registry_path,registry)
+ if (samples or registry_path.exists()) and (not registry_path.exists() or original_registry!=json.dumps(registry,sort_keys=True)):atomic(registry_path,registry)
  assignments=split_assignments(samples,entries,seed)
  manifest_path=root/'manifest.json';old=json.loads(manifest_path.read_text()) if manifest_path.exists() else {'files':[]}
+ previous={r['id']:r for r in old.get('samples',[])};old_files=set(old['files'])
  owned=[];rows=[]
  for split in ('train','test','eval'):
   (root/split/'images').mkdir(parents=True,exist_ok=True);(root/split/label_dir).mkdir(exist_ok=True)
  (root/'unlabeled').mkdir(parents=True,exist_ok=True)
  for r in samples:
   split=assignments[r['id']];image=Path(split)/'images'/(r['id']+Path(r['image']).suffix);label=Path(split)/label_dir/(r['id']+Path(r['label']).suffix)
-  link(r['image'],root/image);link(r['label'],root/label);owned.extend([str(image),str(label)])
-  rows.append({**{k:v for k,v in r.items() if k not in ('image','label')},'split':split,'image':str(image),'label':str(label)})
+  row={**{k:v for k,v in r.items() if k not in ('image','label')},'split':split,'image':str(image),'label':str(label)}
+  if changed_ids is None or r['id'] in changed_ids or previous.get(r['id'])!=row:
+   link(r['image'],root/image);link(r['label'],root/label)
+  owned.extend([str(image),str(label)]);rows.append(row)
  for r in unlabeled:
-  image=Path('unlabeled')/(r['id']+Path(r['image']).suffix);link(r['image'],root/image);owned.append(str(image))
+  image=Path('unlabeled')/(r['id']+Path(r['image']).suffix)
+  if changed_ids is None or r['id'] in changed_ids or str(image) not in old_files:link(r['image'],root/image)
+  owned.append(str(image))
  keep=set(owned)
  for relative in old['files']:
   if relative not in keep:
    p=(root/relative).resolve()
    if p.is_relative_to(root.resolve()):p.unlink(missing_ok=True)
- atomic(manifest_path,{'splits':{'train':'training','test':'validation','eval':'fixed final evaluation'},'files':owned,'samples':rows})
+ manifest={'splits':{'train':'training','test':'validation','eval':'fixed final evaluation'},'files':owned,'samples':rows}
+ if old!=manifest:atomic(manifest_path,manifest)
  return rows
 
 def archive_imports(source,work,root,rows):

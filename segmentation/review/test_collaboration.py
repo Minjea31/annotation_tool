@@ -95,6 +95,62 @@ class CollaborationTest(unittest.TestCase):
     def paint(self, page, value):
         page.evaluate('(value)=>{mask[0]=value;changed();}', value)
 
+    def test_conditional_state_revalidates_after_each_tools_save(self):
+        source = self.directory/'input'
+        for prefix in ('/segmentation', '/bbox'):
+            def api(path, body=None, etag=None):
+                headers = {'Content-Type':'application/json'}
+                if etag:
+                    headers['If-None-Match'] = etag
+                request = urllib.request.Request(self.url+prefix+'/api'+path,
+                    data=None if body is None else json.dumps(body).encode(), headers=headers)
+                return urllib.request.urlopen(request, timeout=10)
+            if prefix == '/bbox':
+                api('/import', {'path':str(source)}).close()
+            with api('/state') as response:
+                state = json.load(response)
+                tag = response.headers['ETag']
+            with self.assertRaises(urllib.error.HTTPError) as unchanged:
+                api('/state', etag=tag)
+            self.assertEqual(unchanged.exception.code, 304)
+            row = state['images'][0]
+            if prefix == '/bbox':
+                api('/images/'+row['id']+'/boxes',
+                    {'boxes':[], 'expected_revision':row['current'], 'approve':True}).close()
+            else:
+                api('/images/'+row['id']+'/status',
+                    {'status':'retry', 'expected_revision':row['current']}).close()
+            with api('/state', etag=tag) as response:
+                self.assertEqual(response.status, 200)
+                self.assertNotEqual(response.headers['ETag'], tag)
+
+    def test_bbox_approval_uses_one_write_without_waiting_for_state(self):
+        request = urllib.request.Request(self.url+'/bbox/api/import',
+            data=json.dumps({'path':str(self.directory/'input')}).encode(),
+            headers={'Content-Type':'application/json'})
+        with urllib.request.urlopen(request, timeout=10):
+            pass
+        first, second = self.pages
+        for page in self.pages:
+            page.goto(self.url+'/bbox/')
+            page.wait_for_function('picture!==null')
+            page.select_option('#filter', 'all')
+        second.keyboard.press('KeyE')
+        second.wait_for_function('(id)=>current.id!==id', arg=first.evaluate('current.id'))
+        ids = [page.evaluate('current.id') for page in self.pages]
+        writes = [[], []]
+        for index, page in enumerate(self.pages):
+            page.route('**/api/state*', lambda route: route.abort())
+            page.on('request', lambda request, index=index:
+                    writes[index].append(request.url) if request.method=='POST' else None)
+            page.keyboard.press('KeyW')
+        for index, (page, image_id) in enumerate(zip(self.pages, ids)):
+            page.wait_for_function('(id)=>current.id!==id&&!busy', arg=image_id)
+            self.assertEqual(writes[index], [self.url+'/bbox/api/images/'+image_id+'/boxes'])
+        with urllib.request.urlopen(self.url+'/bbox/api/state', timeout=10) as response:
+            rows = {row['id']:row for row in json.load(response)['images']}
+        self.assertTrue(all(rows[image_id]['status']=='approved' for image_id in ids))
+
     def test_remote_saved_mask_refreshes_without_page_reload(self):
         first, second = self.pages
         image_id = first.evaluate('current.id')
