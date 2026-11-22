@@ -4,22 +4,27 @@ BBox와 차선 Segmentation을 편집·승인하고 모델을 추가 학습하�
 
 ## 설치
 
-Python 3.10 이상을 사용합니다. GPU를 사용하려면 환경에 맞는 PyTorch/CUDA를 먼저 설치하세요.
+Miniconda 또는 Anaconda를 설치한 뒤 Python 3.10 환경을 만듭니다.
 
 ```bash
 git clone https://github.com/Minjea31/annotation_tool.git
 cd annotation_tool
-python3 -m venv .venv
-source .venv/bin/activate
+conda create -n annotation python=3.10 pip -y
+conda activate annotation
 python -m pip install -r requirements.txt
 ```
+
+GPU를 사용하려면 `annotation` 환경을 활성화한 상태에서 PC의 CUDA 또는 JetPack에
+맞는 PyTorch·torchvision을 먼저 설치한 뒤 `requirements.txt`를 설치하세요.
+이미 필요한 패키지가 설치된 Conda 환경이 있다면 새로 만들지 않고
+`conda activate yolo`처럼 해당 환경을 활성화해도 됩니다.
 
 ## 혼자 사용하기
 
 설치한 컴퓨터의 터미널에서 서버를 실행합니다.
 
 ```bash
-source .venv/bin/activate
+conda activate annotation
 ANNOTATION_HOST=127.0.0.1 ./run.sh
 ```
 
@@ -36,8 +41,10 @@ ANNOTATION_HOST=127.0.0.1 ./run.sh
 다음에 같은 설정으로 실행하면 기존 이미지·라벨·검수 이력을 이어서 사용합니다.
 `launcher.html`을 직접 열어도 서버를 먼저 실행해야 합니다.
 
-`./run.sh`는 저장소의 `.venv`, 현재 Python, 기존 Conda `yolo` 환경 순서로
-필요한 패키지가 있는 Python을 찾습니다. Python이나 포트를 지정하려면 다음처럼 실행합니다.
+새 터미널을 열 때마다 `conda activate annotation`으로 환경을 활성화합니다.
+`./run.sh`는 활성화한 Conda 환경, 현재 Python, 기존 Anaconda `yolo` 환경 순서로
+필요한 패키지가 있는 Python을 찾습니다. `ANNOTATION_PYTHON`을 지정하면 그 Python을
+우선 사용합니다. Python이나 포트를 지정하려면 다음처럼 실행합니다.
 
 ```bash
 ANNOTATION_PYTHON=/path/to/python ANNOTATION_HOST=127.0.0.1 ANNOTATION_PORT=8766 ./run.sh
@@ -50,7 +57,7 @@ ANNOTATION_PYTHON=/path/to/python ANNOTATION_HOST=127.0.0.1 ANNOTATION_PORT=8766
 이미지와 모델을 보관할 컴퓨터 **한 대에서 서버 하나만** 실행합니다.
 
 ```bash
-source .venv/bin/activate
+conda activate annotation
 ./run.sh
 # 기본값: ANNOTATION_HOST=0.0.0.0, ANNOTATION_PORT=8765
 ```

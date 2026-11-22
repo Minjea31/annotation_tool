@@ -3,7 +3,12 @@ set -euo pipefail
 annotation_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 annotation_python="${ANNOTATION_PYTHON:-${LANE_REVIEW_PYTHON:-}}"
 if [[ -z "$annotation_python" ]]; then
-  for candidate in "$annotation_dir/.venv/bin/python" python3 "$HOME/anaconda3/envs/yolo/bin/python"; do
+  annotation_candidates=()
+  if [[ -n "${CONDA_PREFIX:-}" ]]; then
+    annotation_candidates+=("$CONDA_PREFIX/bin/python")
+  fi
+  annotation_candidates+=(python3 "$HOME/anaconda3/envs/yolo/bin/python")
+  for candidate in "${annotation_candidates[@]}"; do
     if command -v "$candidate" >/dev/null 2>&1 && "$candidate" -c 'import importlib.util; import sys; sys.exit(not all(importlib.util.find_spec(m) for m in ("fastapi", "uvicorn", "numpy", "PIL", "torch", "torchvision")))' 2>/dev/null; then
       annotation_python="$candidate"
       break
